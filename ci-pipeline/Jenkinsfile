@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    parameters {
+        string(
+            name: 'AMI_ID',
+            defaultValue: 'ami-0f8a61b66d1accaee',
+            description: 'Ubuntu AMI ID in us-east-1'
+        )
+
+        string(
+            name: 'KEY_NAME',
+            defaultValue: 'jenkins_server',
+            description: 'Existing AWS EC2 key pair name'
+        )
+
+        string(
+            name: 'ALLOWED_SSH_CIDR',
+            defaultValue: '124.123.192.253/32',
+            description: 'Your current public IP in CIDR format, e.g. 203.0.113.10/32'
+        )
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        AWS_REGION         = 'us-east-1'
+        TF_IN_AUTOMATION   = 'true'
+        TF_INPUT           = 'false'
+    }
+
+    stages {
+        stage('Checkout Repository') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/fardeenkhan-engineer/terraform-jenkins-cicd.git'
+            }
+        }
+
+        stage('Check Tools') {
+            steps {
+                sh '''
+                    set -e
+                    terraform version
+                    git --version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Terraform Format Check') {
+            steps {
+                sh 'terraform fmt -check -recursive'
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh 'terraform init -input=false'
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                sh 'terraform validate'
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    withEnv([
+                        "TF_VAR_ami_id=${params.AMI_ID}",
+                        "TF_VAR_key_name=${params.KEY_NAME}",
+                        "TF_VAR_allowed_ssh_cidr=${params.ALLOWED_SSH_CIDR}"
+                    ]) {
+                        sh '''
+                            set -e
+
+                            terraform plan \
+                                -input=false \
+                                -no-color \
+                                -out=tfplan
+
+                            terraform show -no-color tfplan > plan.txt
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts(
+                artifacts: 'plan.txt,tfplan',
+                fingerprint: true
+            )
+            echo 'Terraform CI succeeded. No terraform apply was executed.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Review the failed stage in Console Output.'
+        }
+
+        cleanup {
+            deleteDir()
+        }
+    }
+}

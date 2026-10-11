@@ -1,0 +1,186 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        AWS_REGION         = 'us-east-1'
+        TF_IN_AUTOMATION   = 'true'
+        TF_INPUT           = 'false'
+
+        TF_VAR_ami_id           = 'ami-0f8a61b66d1accaee'
+        TF_VAR_key_name         = 'jenkins_server'
+        TF_VAR_allowed_ssh_cidr = '44.207.228.165/32'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/fardeenkhan-engineer/terraform-jenkins-cicd.git'
+            }
+        }
+
+        stage('Check Tools') {
+            steps {
+                sh '''
+                    set -eu
+                    git --version
+                    terraform version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Terraform Format') {
+            steps {
+                sh '''
+                    set -eu
+                    terraform fmt -check -recursive
+                '''
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        aws sts get-caller-identity
+                        terraform init -input=false
+                    '''
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                sh '''
+                    set -eu
+                    terraform validate
+                '''
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        terraform plan \
+                            -input=false \
+                            -out=tfplan
+
+                        terraform show -no-color tfplan > plan.txt
+                    '''
+                }
+
+                archiveArtifacts(
+                    artifacts: 'plan.txt',
+                    fingerprint: true
+                )
+            }
+        }
+
+        stage('Manual Approval') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    input(
+                        message: 'Review plan.txt and approve AWS infrastructure deployment?',
+                        ok: 'Approve and Deploy'
+                    )
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        terraform apply -input=false tfplan
+                    '''
+                }
+            }
+        }
+
+        stage('Deployment Output') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'aws-access-key-id',
+                        variable: 'AWS_ACCESS_KEY_ID'
+                    ),
+                    string(
+                        credentialsId: 'aws-secret-access-key',
+                        variable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        terraform output
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'SUCCESS: Terraform CD deployment completed.'
+        }
+
+        failure {
+            echo 'FAILED: Check Jenkins Console Output.'
+        }
+
+        aborted {
+            echo 'ABORTED: Terraform deployment was cancelled.'
+        }
+
+        always {
+            archiveArtifacts(
+                artifacts: 'plan.txt',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
+
+            cleanWs()
+        }
+    }
+}
