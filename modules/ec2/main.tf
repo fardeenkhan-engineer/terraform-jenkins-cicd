@@ -30,6 +30,6 @@ resource "aws_instance" "this" {
   vpc_security_group_ids = [aws_security_group.this.id]
 
   tags = {
-    Name = "terraform-cicd-ec2"
+    Name = "terraform-cicd-ec2-01"
   }
 }
